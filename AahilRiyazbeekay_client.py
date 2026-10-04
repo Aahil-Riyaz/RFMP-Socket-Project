@@ -62,6 +62,8 @@ def main():
         print("3. rmdir (delete folder)")
         print("4. del (delete file)")
         print("5. ren (rename)")
+        print("6. openRead (read a file)")
+        print("7. openWrite (write a new file)")
         print("8. other commands (ls, pwd, whoami, hostname, cat)")
         print("9. exit")
         choice = input("choose: ")
@@ -91,6 +93,33 @@ def main():
             new = input("new name: ")
             send_packet(sock, "(CM,prompt,ren " + old + " " + new + ")")
             show_reply(receive_packet(sock))
+
+        elif choice == "6":
+            name = input("file to read: ")
+            send_packet(sock, "(CM,openRead," + name + ")")
+            reply = receive_packet(sock)
+            if reply.startswith("(SC"):
+                text = reply[4:-1]
+                print("------ " + name + " ------")
+                print(text)
+                print("-------------------")
+            else:
+                show_reply(reply)
+
+        elif choice == "7":
+            name = input("file to create: ")
+            send_packet(sock, "(CM,openWrite," + name + ")")
+            reply = receive_packet(sock)
+            show_reply(reply)
+            if reply.startswith("(SC"):
+                print("type your text, type END on a new line to stop")
+                text = ""
+                line = input()
+                while line != "END":
+                    text = text + line + "\n"
+                    line = input()
+                send_packet(sock, "(DP," + text + ")")
+                show_reply(receive_packet(sock))
 
         elif choice == "8":
             cmd = input("command (ls, pwd, whoami, hostname, cat filename): ")

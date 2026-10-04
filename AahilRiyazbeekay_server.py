@@ -104,6 +104,7 @@ def run_command(conn, command, cwd):
 def handle_client(conn, addr):
     print("got a connection from", addr)
     cwd = os.getcwd()      # every client has its own folder
+    write_file = None      # the file opened with openWrite
 
     try:
         # ### setup phase
@@ -147,8 +148,36 @@ def handle_client(conn, addr):
                     send_error(conn, "100", "bad command packet")
                 elif fields[1] == "prompt":
                     cwd = run_command(conn, fields[2], cwd)
+                elif fields[1] == "openRead":
+                    path = os.path.join(cwd, fields[2])
+                    if os.path.isfile(path):
+                        f = open(path, "r")
+                        content = f.read()
+                        f.close()
+                        send_packet(conn, "(SC," + content + ")")
+                    else:
+                        send_error(conn, "200", "file not found")
+                elif fields[1] == "openWrite":
+                    try:
+                        write_file = os.path.join(cwd, fields[2])
+                        f = open(write_file, "w")   # makes a new empty file
+                        f.close()
+                        send_packet(conn, "(SC,file created now send the data)")
+                    except OSError:
+                        write_file = None
+                        send_error(conn, "300", "could not create the file")
                 else:
                     send_error(conn, "100", "unknown command type")
+
+            elif packet.startswith("(DP,"):
+                if write_file is None:
+                    send_error(conn, "100", "use openWrite first")
+                    continue
+                text = packet[4:-1]
+                f = open(write_file, "a")
+                f.write(text)
+                f.close()
+                send_packet(conn, "(SC,data saved)")
 
             else:
                 send_error(conn, "100", "unknown packet")
