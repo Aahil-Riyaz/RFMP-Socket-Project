@@ -9,7 +9,9 @@ import os
 import subprocess
 import base64
 from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Cipher import PKCS1_OAEP, AES
+from Crypto.Util.Padding import pad, unpad
+from Crypto.Random import get_random_bytes
 
 HOST = "0.0.0.0"
 PORT = 5000
@@ -63,13 +65,30 @@ def caesar_encrypt(text, shift):
 def caesar_decrypt(text, shift):
     return caesar_encrypt(text, -shift)
 
+# ### AES (CBC mode)
+def aes_encrypt(text, key):
+    iv = get_random_bytes(16)   # new random iv every time
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    encrypted = cipher.encrypt(pad(text.encode(), 16))
+    return base64.b64encode(iv + encrypted).decode()   # iv is sent in front of the data
+
+def aes_decrypt(text, key):
+    raw = base64.b64decode(text)
+    iv = raw[:16]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return unpad(cipher.decrypt(raw[16:]), 16).decode()
+
 # algorithm is None when the client did not ask for security
 def encrypt(text, algorithm, key):
+    if algorithm == "AES":
+        return aes_encrypt(text, key)
     if algorithm == "CAESAR":
         return caesar_encrypt(text, key)
     return text
 
 def decrypt(text, algorithm, key):
+    if algorithm == "AES":
+        return aes_decrypt(text, key)
     if algorithm == "CAESAR":
         return caesar_decrypt(text, key)
     return text
@@ -168,8 +187,8 @@ def handle_client(conn, addr):
                 return
 
             algorithm = fields[1].upper()
-            if algorithm != "CAESAR":
-                send_error(conn, "400", "only caesar works for now")
+            if algorithm != "AES" and algorithm != "CAESAR":
+                send_error(conn, "400", "algorithm must be AES or Caesar")
                 return
 
             try:
@@ -182,7 +201,10 @@ def handle_client(conn, addr):
                 send_error(conn, "400", "could not decrypt the session key")
                 return
 
-            key = int(session_key.decode())   # caesar shift number
+            if algorithm == "AES":
+                key = session_key   # 16 bytes
+            else:
+                key = int(session_key.decode())   # caesar shift number
             print(addr, "secure, user:", username, "algorithm:", algorithm)
             print(addr, "client public key:", client_public_key[:40] + "...")
             send_packet(conn, "(SC,secure connection ready)")

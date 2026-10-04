@@ -6,7 +6,9 @@ import socket
 import base64
 import random
 from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Cipher import PKCS1_OAEP, AES
+from Crypto.Util.Padding import pad, unpad
+from Crypto.Random import get_random_bytes
 
 SERVER = "127.0.0.1"
 PORT = 5000
@@ -41,12 +43,29 @@ def caesar_encrypt(text, shift):
 def caesar_decrypt(text, shift):
     return caesar_encrypt(text, -shift)
 
+# ### AES (same as the server)
+def aes_encrypt(text, key):
+    iv = get_random_bytes(16)
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    encrypted = cipher.encrypt(pad(text.encode(), 16))
+    return base64.b64encode(iv + encrypted).decode()
+
+def aes_decrypt(text, key):
+    raw = base64.b64decode(text)
+    iv = raw[:16]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return unpad(cipher.decrypt(raw[16:]), 16).decode()
+
 def encrypt(text, algorithm, key):
+    if algorithm == "AES":
+        return aes_encrypt(text, key)
     if algorithm == "CAESAR":
         return caesar_encrypt(text, key)
     return text
 
 def decrypt(text, algorithm, key):
+    if algorithm == "AES":
+        return aes_decrypt(text, key)
     if algorithm == "CAESAR":
         return caesar_decrypt(text, key)
     return text
@@ -76,13 +95,18 @@ def setup(sock):
         print("connected (not secure)")
         return None, None
 
-    algorithm = "CAESAR"   # only caesar for now
-    print("using Caesar cipher")
+    algorithm = ""
+    while algorithm != "AES" and algorithm != "CAESAR":
+        algorithm = input("Choose algorithm (AES or Caesar): ").upper()
     username = input("Enter username: ")
 
     # 1. make the session key
-    key = random.randint(1, 25)   # caesar shift
-    session_key = str(key).encode()
+    if algorithm == "AES":
+        key = get_random_bytes(16)   # 16 bytes = 128 bit key
+        session_key = key
+    else:
+        key = random.randint(1, 25)   # caesar shift
+        session_key = str(key).encode()
 
     # 2. make the client RSA keys
     print("making RSA keys for the client...")
