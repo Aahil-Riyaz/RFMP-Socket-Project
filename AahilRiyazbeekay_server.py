@@ -1,250 +1,180 @@
-# CSEC-201 Project - Remote File Management Protocol (RFMP)
-# Python Server
-#
-# The server waits for clients, does the setup phase (SS -> CC -> EC),
-# then runs the commands the client sends (CM packets) and answers
-# every command with SC (success) or EE (error).
-# Each client gets its own thread so many clients can connect at once.
+# CSEC-201 Project - RFMP (Remote File Management Protocol)
+# Server side
+# the server waits for clients and runs the commands they send
+# every client gets its own thread so more than one can connect
 
 import socket
 import threading
-import struct
 import os
 import subprocess
 
-HOST = "0.0.0.0"   # listen on all network cards
+HOST = "0.0.0.0"
 PORT = 5000
 
-# Error codes we use in EE packets (max 4 allowed)
-ERR_BAD_PACKET = "100"   # wrong format / unknown packet / wrong order
-ERR_NOT_FOUND = "200"    # file or folder does not exist
-ERR_CMD_FAILED = "300"   # command could not be run
+# our error codes for EE packets
+# 100 = bad packet
+# 200 = file or folder not found
+# 300 = command failed / not allowed
 
-# The 5 extra system commands we allow (Linux/Mac name : Windows name)
-EXTRA_COMMANDS = {
-    "ls": "dir",
-    "pwd": "cd",
-    "whoami": "whoami",
-    "hostname": "hostname",
-    "cat": "type",
-}
+# the 5 extra commands we picked and their names on windows
+extra_commands = {"ls": "dir", "pwd": "cd", "whoami": "whoami", "hostname": "hostname", "cat": "type"}
 
-# ---------------------------------------------------------------
-# Sending and receiving packets
-# TCP is a stream so we put a 4 byte length in front of every
-# packet. This way the other side knows exactly how much to read.
-# ---------------------------------------------------------------
-def send_packet(sock, text):
-    data = text.encode()
-    sock.sendall(struct.pack("!I", len(data)) + data)
-
-def recv_exact(sock, n):
+def receive_packet(conn):
+    # TCP can split a big message into parts
+    # so we keep reading until the message ends with )
     data = b""
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:          # client closed the connection
-            return None
-        data += chunk
-    return data
-
-def recv_packet(sock):
-    header = recv_exact(sock, 4)
-    if header is None:
-        return None
-    length = struct.unpack("!I", header)[0]
-    data = recv_exact(sock, length)
-    if data is None:
-        return None
+    while True:
+        part = conn.recv(4096)
+        if not part:
+            break
+        data = data + part
+        if data.endswith(b")"):
+            break
     return data.decode()
 
-def strip_brackets(packet):
-    # "(CM,prompt,ls)" -> "CM,prompt,ls"
-    packet = packet.strip()
-    if packet.startswith("(") and packet.endswith(")"):
-        packet = packet[1:-1]
-    return packet
+def send_packet(conn, packet):
+    conn.sendall(packet.encode())
 
-def send_error(sock, code, description):
-    send_packet(sock, f"(EE,{code},{description})")
+def send_error(conn, code, msg):
+    send_packet(conn, "(EE," + code + "," + msg + ")")
 
-# ---------------------------------------------------------------
-# Setup phase: SS -> CC   (secure mode will be added later)
-# returns the session dictionary or None if something went wrong
-# ---------------------------------------------------------------
-def setup_phase(conn, addr):
-    session = {
-        "secure": False,
-        "cwd": os.getcwd(),      # every client has its own folder path
-    }
-
-    packet = recv_packet(conn)
-    if packet is None:
-        return None
-    print(f"[{addr}] received: {packet}")
-    fields = [f.strip() for f in strip_brackets(packet).split(",")]
-
-    # Start packet must be (SS,RFMP,v1.0,0 or 1)
-    if len(fields) != 4 or fields[0] != "SS" or fields[1] != "RFMP":
-        send_error(conn, ERR_BAD_PACKET, "Expected start packet (SS,RFMP,version,0/1)")
-        return None
-    if fields[3] not in ("0", "1"):
-        send_error(conn, ERR_BAD_PACKET, "Secure field must be 0 or 1")
-        return None
-
-    if fields[3] == "0":
-        # no security, CC has only one field
-        send_packet(conn, "(CC)")
-        print(f"[{addr}] non-secure session started")
-        return session
-
-    # TODO: secure mode (RSA + encryption) not done yet
-    send_error(conn, ERR_BAD_PACKET, "Secure mode is not supported yet")
-    return None
-
-# ---------------------------------------------------------------
-# Prompt commands (CM,prompt,...)
-# ---------------------------------------------------------------
-def full_path(session, name):
-    return os.path.join(session["cwd"], name)
-
-def run_prompt(conn, session, command_text):
-    parts = command_text.split()
+# runs the prompt commands, returns the folder the client is in
+# (it only changes when the command is cd)
+def run_command(conn, command, cwd):
+    parts = command.split()
     if len(parts) == 0:
-        send_error(conn, ERR_BAD_PACKET, "Empty command")
-        return
-    cmd = parts[0].lower()
-    args = parts[1:]
+        send_error(conn, "100", "empty command")
+        return cwd
+    cmd = parts[0]
 
     try:
         if cmd == "mkdir":
-            if len(args) != 1:
-                send_error(conn, ERR_BAD_PACKET, "Usage: mkdir folderName")
-                return
-            os.mkdir(full_path(session, args[0]))
-            send_packet(conn, f"(SC,Folder {args[0]} created)")
+            os.mkdir(os.path.join(cwd, parts[1]))
+            send_packet(conn, "(SC,folder " + parts[1] + " created)")
 
         elif cmd == "cd":
-            if len(args) != 1:
-                send_error(conn, ERR_BAD_PACKET, "Usage: cd path")
-                return
-            new_path = os.path.abspath(full_path(session, args[0]))
-            if not os.path.isdir(new_path):
-                send_error(conn, ERR_NOT_FOUND, f"Folder {args[0]} not found")
-                return
-            session["cwd"] = new_path   # only changes for this client
-            send_packet(conn, f"(SC,Current folder is {new_path})")
+            new_path = os.path.abspath(os.path.join(cwd, parts[1]))
+            if os.path.isdir(new_path):
+                cwd = new_path
+                send_packet(conn, "(SC,now in " + cwd + ")")
+            else:
+                send_error(conn, "200", "folder not found")
 
-        elif cmd in ("rmdir", "rd"):
-            if len(args) != 1:
-                send_error(conn, ERR_BAD_PACKET, "Usage: rmdir folderName")
-                return
-            os.rmdir(full_path(session, args[0]))   # folder must be empty
-            send_packet(conn, f"(SC,Folder {args[0]} deleted)")
+        elif cmd == "rmdir" or cmd == "rd":
+            os.rmdir(os.path.join(cwd, parts[1]))   # folder has to be empty
+            send_packet(conn, "(SC,folder " + parts[1] + " deleted)")
 
         elif cmd == "del":
-            if len(args) != 1:
-                send_error(conn, ERR_BAD_PACKET, "Usage: del fileName")
-                return
-            path = full_path(session, args[0])
-            if not os.path.isfile(path):
-                send_error(conn, ERR_NOT_FOUND, f"File {args[0]} not found")
-                return
-            os.remove(path)
-            send_packet(conn, f"(SC,File {args[0]} deleted)")
+            path = os.path.join(cwd, parts[1])
+            if os.path.isfile(path):
+                os.remove(path)
+                send_packet(conn, "(SC,file " + parts[1] + " deleted)")
+            else:
+                send_error(conn, "200", "file not found")
 
         elif cmd == "ren":
-            if len(args) != 2:
-                send_error(conn, ERR_BAD_PACKET, "Usage: ren oldName newName")
-                return
-            os.rename(full_path(session, args[0]), full_path(session, args[1]))
-            send_packet(conn, f"(SC,{args[0]} renamed to {args[1]})")
+            os.rename(os.path.join(cwd, parts[1]), os.path.join(cwd, parts[2]))
+            send_packet(conn, "(SC," + parts[1] + " renamed to " + parts[2] + ")")
 
-        elif cmd in EXTRA_COMMANDS:
-            # the 5 extra commands are run with subprocess.run
-            if os.name == "nt":           # Windows uses different names
-                parts[0] = EXTRA_COMMANDS[cmd]
-            result = subprocess.run(" ".join(parts), shell=True, cwd=session["cwd"],
-                                    capture_output=True, text=True, timeout=10)
-            if result.returncode != 0:
-                send_error(conn, ERR_CMD_FAILED, result.stderr.strip() or "Command failed")
-                return
-            # output goes in a DP packet, then SC
-            send_packet(conn, "(DP," + result.stdout + ")")
-            send_packet(conn, f"(SC,{cmd} done)")
+        elif cmd in extra_commands:
+            if os.name == "nt":   # windows uses different names
+                parts[0] = extra_commands[cmd]
+            result = subprocess.run(" ".join(parts), shell=True, cwd=cwd, capture_output=True, text=True)
+            if result.returncode == 0:
+                send_packet(conn, "(SC," + result.stdout + ")")
+            else:
+                send_error(conn, "300", "command failed")
 
         else:
-            # we only allow known commands so the client can not run
-            # dangerous things like "rm -rf" on the server
-            send_error(conn, ERR_CMD_FAILED, f"Command {cmd} is not allowed")
+            # we only allow our commands so nobody can run dangerous stuff on the server
+            send_error(conn, "300", "command not allowed")
 
+    except IndexError:
+        send_error(conn, "100", "missing name after the command")
     except FileNotFoundError:
-        send_error(conn, ERR_NOT_FOUND, "File or folder not found")
+        send_error(conn, "200", "file or folder not found")
     except FileExistsError:
-        send_error(conn, ERR_CMD_FAILED, "Already exists")
-    except OSError as e:
-        send_error(conn, ERR_CMD_FAILED, str(e).replace(",", " "))
-    except subprocess.TimeoutExpired:
-        send_error(conn, ERR_CMD_FAILED, "Command took too long")
+        send_error(conn, "300", "already exists")
+    except OSError:
+        send_error(conn, "300", "command failed")
 
-# ---------------------------------------------------------------
-# One thread runs this function for every client
-# ---------------------------------------------------------------
+    return cwd
+
+# each client runs this function in its own thread
 def handle_client(conn, addr):
-    print(f"[+] New client {addr}")
+    print("got a connection from", addr)
+    cwd = os.getcwd()      # every client has its own folder
+
     try:
-        session = setup_phase(conn, addr)
-        if session is None:
+        # ### setup phase
+        packet = receive_packet(conn)
+        print(addr, "sent", packet)
+        fields = packet[1:-1].split(",")
+        # start packet should look like (SS,RFMP,v1.0,0) or (SS,RFMP,v1.0,1)
+        if len(fields) != 4 or fields[0] != "SS" or fields[1] != "RFMP":
+            send_error(conn, "100", "expected start packet")
             return
 
-        # Operation phase
+        if fields[3] == "0":
+            send_packet(conn, "(CC)")
+            print(addr, "not secure")
+        elif fields[3] == "1":
+            # TODO secure mode
+            send_error(conn, "100", "secure mode is not done yet")
+            return
+        else:
+            send_error(conn, "100", "last field must be 0 or 1")
+            return
+
+        # ### operation phase
         while True:
-            packet = recv_packet(conn)
-            if packet is None:
-                print(f"[{addr}] disconnected")
+            packet = receive_packet(conn)
+            if packet == "":
+                print(addr, "disconnected")
                 break
-            print(f"[{addr}] received: {packet[:80]}")
-            body = strip_brackets(packet)
+            print(addr, "sent", packet[:60])
 
-            if body == "END":
-                # Closing phase
-                send_packet(conn, "(SC,Goodbye)")
-                print(f"[{addr}] closed the session")
+            if packet == "(END)":
+                # ### closing phase
+                send_packet(conn, "(SC,goodbye)")
+                print(addr, "closed the connection")
                 break
 
-            if body.startswith("CM,"):
-                fields = body.split(",", 2)     # CM, command_type, arguments
+            elif packet.startswith("(CM,"):
+                # (CM,command_type,arguments)
+                fields = packet[1:-1].split(",", 2)
                 if len(fields) != 3:
-                    send_error(conn, ERR_BAD_PACKET, "Format is (CM,type,arguments)")
-                    continue
-                cmd_type = fields[1].strip()
-                argument = fields[2].strip()
-                if cmd_type == "prompt":
-                    run_prompt(conn, session, argument)
+                    send_error(conn, "100", "bad command packet")
+                elif fields[1] == "prompt":
+                    cwd = run_command(conn, fields[2], cwd)
                 else:
-                    send_error(conn, ERR_BAD_PACKET, f"Unknown command type {cmd_type}")
+                    send_error(conn, "100", "unknown command type")
 
             else:
-                send_error(conn, ERR_BAD_PACKET, "Unknown packet type")
+                send_error(conn, "100", "unknown packet")
 
-    except (ConnectionResetError, BrokenPipeError):
-        print(f"[{addr}] connection lost")
+    except ConnectionResetError:
+        print(addr, "connection lost")
     finally:
         conn.close()
 
 def main():
+    # create a TCP socket
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # so we can restart the server right away without "address already in use"
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # bind the socket to the port
     server.bind((HOST, PORT))
+    # queue up to 5 requests
     server.listen(5)
-    print(f"[*] RFMP server listening on port {PORT}")
+    print('starting up on {} port {}'.format(HOST, PORT))
 
     while True:
         conn, addr = server.accept()
-        # new thread for each client (multithreaded server)
-        t = threading.Thread(target=handle_client, args=(conn, addr))
-        t.daemon = True
-        t.start()
-        print(f"[*] Active clients: {threading.active_count() - 1}")
+        # new thread for every client
+        thread_obj = threading.Thread(target=handle_client, args=(conn, addr))
+        thread_obj.start()
+        print("Total number of threads", threading.active_count())
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -1,163 +1,112 @@
-# CSEC-201 Project - Remote File Management Protocol (RFMP)
-# Python Client
-#
-# The client connects to the server, does the setup phase, and then
-# shows a menu so the user can control the server remotely.
+# CSEC-201 Project - RFMP (Remote File Management Protocol)
+# Client side
+# connects to the server and shows a menu so we can control the server
 
 import socket
-import struct
 
-SERVER_IP = "127.0.0.1"
+SERVER = "127.0.0.1"
 PORT = 5000
 
-# ---------------------------------------------------------------
-# Sending and receiving packets (4 byte length + packet text)
-# ---------------------------------------------------------------
-def send_packet(sock, text):
-    data = text.encode()
-    sock.sendall(struct.pack("!I", len(data)) + data)
-
-def recv_exact(sock, n):
+def receive_packet(sock):
+    # keep reading until the message ends with )
     data = b""
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            return None
-        data += chunk
-    return data
-
-def recv_packet(sock):
-    header = recv_exact(sock, 4)
-    if header is None:
-        return None
-    length = struct.unpack("!I", header)[0]
-    data = recv_exact(sock, length)
-    if data is None:
-        return None
+    while True:
+        part = sock.recv(4096)
+        if not part:
+            break
+        data = data + part
+        if data.endswith(b")"):
+            break
     return data.decode()
 
-def strip_brackets(packet):
-    packet = packet.strip()
-    if packet.startswith("(") and packet.endswith(")"):
-        packet = packet[1:-1]
-    return packet
+def send_packet(sock, packet):
+    sock.sendall(packet.encode())
 
-# ---------------------------------------------------------------
-# Reading server answers
-# ---------------------------------------------------------------
-def show_response(sock, session):
-    # Reads packets until we get SC or EE.
-    # DP packets (file contents / command output) are printed first.
-    while True:
-        packet = recv_packet(sock)
-        if packet is None:
-            print("Server closed the connection")
-            return False
-        body = strip_brackets(packet)
+# prints what the server answered
+# (SC,message) or (EE,code,description)
+def show_reply(reply):
+    if reply.startswith("(SC"):
+        print("[SUCCESS]", reply[4:-1])
+    elif reply.startswith("(EE"):
+        fields = reply[1:-1].split(",", 2)
+        print("[ERROR " + fields[1] + "]", fields[2])
+    else:
+        print("unknown reply from server:", reply)
 
-        if body.startswith("DP,"):
-            text = body[3:]
-            print("----- data from server -----")
-            print(text)
-            print("----------------------------")
-
-        elif body.startswith("SC"):
-            message = body[3:] if len(body) > 3 else ""
-            print("[SUCCESS]", message)
-            return True
-
-        elif body.startswith("EE"):
-            # (EE, Error Code, Description)
-            fields = body.split(",", 2)
-            code = fields[1] if len(fields) > 1 else "?"
-            desc = fields[2] if len(fields) > 2 else ""
-            print(f"[ERROR {code}] {desc}")
-            return False
-
-        else:
-            print("Unknown packet from server:", packet)
-            return False
-
-# ---------------------------------------------------------------
-# Setup phase
-# ---------------------------------------------------------------
-def setup_phase(sock):
-    session = {"secure": False, "algorithm": None, "key": None}
-
-    # only non-secure mode for now (secure = 0)
+# setup phase, only non secure for now
+def setup(sock):
     send_packet(sock, "(SS,RFMP,v1.0,0)")
-    reply = strip_brackets(recv_packet(sock))
-    if reply != "CC":
-        print("Server did not confirm:", reply)
-        return None
-    print("Connected (not secure)")
-    return session
-
-
-# ---------------------------------------------------------------
-# Menu
-# ---------------------------------------------------------------
-def print_menu():
-    print()
-    print("========= RFMP MENU =========")
-    print("1. mkdir   - create folder")
-    print("2. cd      - change folder")
-    print("3. rmdir   - delete folder")
-    print("4. del     - delete file")
-    print("5. ren     - rename file/folder")
-    print("8. Other commands (ls, pwd, whoami, hostname, cat)")
-    print("9. Exit")
+    reply = receive_packet(sock)
+    if reply != "(CC)":
+        print("server did not confirm:", reply)
+        sock.close()
+        exit()
+    print("connected (not secure)")
 
 def main():
+    # create a TCP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        sock.connect((SERVER_IP, PORT))
-    except ConnectionRefusedError:
-        print("Can not connect to server. Is it running?")
+        sock.connect((SERVER, PORT))
+    except:
+        print("could not connect to the server, is it running?")
         return
 
-    session = setup_phase(sock)
-    if session is None:
-        sock.close()
-        return
+    setup(sock)
 
     while True:
-        print_menu()
-        choice = input("Choose option: ").strip()
+        print()
+        print("======= RFMP MENU =======")
+        print("1. mkdir (make folder)")
+        print("2. cd (change folder)")
+        print("3. rmdir (delete folder)")
+        print("4. del (delete file)")
+        print("5. ren (rename)")
+        print("8. other commands (ls, pwd, whoami, hostname, cat)")
+        print("9. exit")
+        choice = input("choose: ")
 
         if choice == "1":
-            name = input("Folder name: ")
-            send_packet(sock, f"(CM,prompt,mkdir {name})")
+            name = input("folder name: ")
+            send_packet(sock, "(CM,prompt,mkdir " + name + ")")
+            show_reply(receive_packet(sock))
+
         elif choice == "2":
-            path = input("Path: ")
-            send_packet(sock, f"(CM,prompt,cd {path})")
+            path = input("path: ")
+            send_packet(sock, "(CM,prompt,cd " + path + ")")
+            show_reply(receive_packet(sock))
+
         elif choice == "3":
-            name = input("Folder name: ")
-            send_packet(sock, f"(CM,prompt,rmdir {name})")
+            name = input("folder name: ")
+            send_packet(sock, "(CM,prompt,rmdir " + name + ")")
+            show_reply(receive_packet(sock))
+
         elif choice == "4":
-            name = input("File name: ")
-            send_packet(sock, f"(CM,prompt,del {name})")
+            name = input("file name: ")
+            send_packet(sock, "(CM,prompt,del " + name + ")")
+            show_reply(receive_packet(sock))
+
         elif choice == "5":
-            old = input("Old name: ")
-            new = input("New name: ")
-            send_packet(sock, f"(CM,prompt,ren {old} {new})")
+            old = input("old name: ")
+            new = input("new name: ")
+            send_packet(sock, "(CM,prompt,ren " + old + " " + new + ")")
+            show_reply(receive_packet(sock))
+
         elif choice == "8":
-            cmd = input("Command (ls, pwd, whoami, hostname, cat file): ")
-            send_packet(sock, f"(CM,prompt,{cmd})")
+            cmd = input("command (ls, pwd, whoami, hostname, cat filename): ")
+            send_packet(sock, "(CM,prompt," + cmd + ")")
+            show_reply(receive_packet(sock))
+
         elif choice == "9":
             # closing phase
             send_packet(sock, "(END)")
-            show_response(sock, session)
+            show_reply(receive_packet(sock))
             break
-        else:
-            print("Wrong option, try again")
-            continue
 
-        show_response(sock, session)
+        else:
+            print("wrong choice try again")
 
     sock.close()
-    print("Disconnected.")
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
