@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+client_c
+client_c.exe
+*.o
+.DS_Store
+.vscode/
