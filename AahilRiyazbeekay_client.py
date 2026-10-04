@@ -6,6 +6,7 @@
 
 import socket
 import struct
+
 SERVER_IP = "127.0.0.1"
 PORT = 5000
 
@@ -92,12 +93,19 @@ def setup_phase(sock):
     print("Connected (not secure)")
     return session
 
+
 # ---------------------------------------------------------------
 # Menu
 # ---------------------------------------------------------------
 def print_menu():
     print()
     print("========= RFMP MENU =========")
+    print("1. mkdir   - create folder")
+    print("2. cd      - change folder")
+    print("3. rmdir   - delete folder")
+    print("4. del     - delete file")
+    print("5. ren     - rename file/folder")
+    print("8. Other commands (ls, pwd, whoami, hostname, cat)")
     print("9. Exit")
 
 def main():
@@ -112,12 +120,31 @@ def main():
     if session is None:
         sock.close()
         return
-    
+
     while True:
         print_menu()
         choice = input("Choose option: ").strip()
 
-        if choice == "9":
+        if choice == "1":
+            name = input("Folder name: ")
+            send_packet(sock, f"(CM,prompt,mkdir {name})")
+        elif choice == "2":
+            path = input("Path: ")
+            send_packet(sock, f"(CM,prompt,cd {path})")
+        elif choice == "3":
+            name = input("Folder name: ")
+            send_packet(sock, f"(CM,prompt,rmdir {name})")
+        elif choice == "4":
+            name = input("File name: ")
+            send_packet(sock, f"(CM,prompt,del {name})")
+        elif choice == "5":
+            old = input("Old name: ")
+            new = input("New name: ")
+            send_packet(sock, f"(CM,prompt,ren {old} {new})")
+        elif choice == "8":
+            cmd = input("Command (ls, pwd, whoami, hostname, cat file): ")
+            send_packet(sock, f"(CM,prompt,{cmd})")
+        elif choice == "9":
             # closing phase
             send_packet(sock, "(END)")
             show_response(sock, session)
@@ -130,6 +157,7 @@ def main():
 
     sock.close()
     print("Disconnected.")
+
 
 if __name__ == "__main__":
     main()

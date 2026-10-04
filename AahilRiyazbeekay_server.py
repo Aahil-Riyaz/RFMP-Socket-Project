@@ -9,11 +9,25 @@
 import socket
 import threading
 import struct
+import os
+import subprocess
 
 HOST = "0.0.0.0"   # listen on all network cards
 PORT = 5000
+
 # Error codes we use in EE packets (max 4 allowed)
 ERR_BAD_PACKET = "100"   # wrong format / unknown packet / wrong order
+ERR_NOT_FOUND = "200"    # file or folder does not exist
+ERR_CMD_FAILED = "300"   # command could not be run
+
+# The 5 extra system commands we allow (Linux/Mac name : Windows name)
+EXTRA_COMMANDS = {
+    "ls": "dir",
+    "pwd": "cd",
+    "whoami": "whoami",
+    "hostname": "hostname",
+    "cat": "type",
+}
 
 # ---------------------------------------------------------------
 # Sending and receiving packets
@@ -60,6 +74,7 @@ def send_error(sock, code, description):
 def setup_phase(conn, addr):
     session = {
         "secure": False,
+        "cwd": os.getcwd(),      # every client has its own folder path
     }
 
     packet = recv_packet(conn)
@@ -87,6 +102,91 @@ def setup_phase(conn, addr):
     return None
 
 # ---------------------------------------------------------------
+# Prompt commands (CM,prompt,...)
+# ---------------------------------------------------------------
+def full_path(session, name):
+    return os.path.join(session["cwd"], name)
+
+def run_prompt(conn, session, command_text):
+    parts = command_text.split()
+    if len(parts) == 0:
+        send_error(conn, ERR_BAD_PACKET, "Empty command")
+        return
+    cmd = parts[0].lower()
+    args = parts[1:]
+
+    try:
+        if cmd == "mkdir":
+            if len(args) != 1:
+                send_error(conn, ERR_BAD_PACKET, "Usage: mkdir folderName")
+                return
+            os.mkdir(full_path(session, args[0]))
+            send_packet(conn, f"(SC,Folder {args[0]} created)")
+
+        elif cmd == "cd":
+            if len(args) != 1:
+                send_error(conn, ERR_BAD_PACKET, "Usage: cd path")
+                return
+            new_path = os.path.abspath(full_path(session, args[0]))
+            if not os.path.isdir(new_path):
+                send_error(conn, ERR_NOT_FOUND, f"Folder {args[0]} not found")
+                return
+            session["cwd"] = new_path   # only changes for this client
+            send_packet(conn, f"(SC,Current folder is {new_path})")
+
+        elif cmd in ("rmdir", "rd"):
+            if len(args) != 1:
+                send_error(conn, ERR_BAD_PACKET, "Usage: rmdir folderName")
+                return
+            os.rmdir(full_path(session, args[0]))   # folder must be empty
+            send_packet(conn, f"(SC,Folder {args[0]} deleted)")
+
+        elif cmd == "del":
+            if len(args) != 1:
+                send_error(conn, ERR_BAD_PACKET, "Usage: del fileName")
+                return
+            path = full_path(session, args[0])
+            if not os.path.isfile(path):
+                send_error(conn, ERR_NOT_FOUND, f"File {args[0]} not found")
+                return
+            os.remove(path)
+            send_packet(conn, f"(SC,File {args[0]} deleted)")
+
+        elif cmd == "ren":
+            if len(args) != 2:
+                send_error(conn, ERR_BAD_PACKET, "Usage: ren oldName newName")
+                return
+            os.rename(full_path(session, args[0]), full_path(session, args[1]))
+            send_packet(conn, f"(SC,{args[0]} renamed to {args[1]})")
+
+        elif cmd in EXTRA_COMMANDS:
+            # the 5 extra commands are run with subprocess.run
+            if os.name == "nt":           # Windows uses different names
+                parts[0] = EXTRA_COMMANDS[cmd]
+            result = subprocess.run(" ".join(parts), shell=True, cwd=session["cwd"],
+                                    capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                send_error(conn, ERR_CMD_FAILED, result.stderr.strip() or "Command failed")
+                return
+            # output goes in a DP packet, then SC
+            send_packet(conn, "(DP," + result.stdout + ")")
+            send_packet(conn, f"(SC,{cmd} done)")
+
+        else:
+            # we only allow known commands so the client can not run
+            # dangerous things like "rm -rf" on the server
+            send_error(conn, ERR_CMD_FAILED, f"Command {cmd} is not allowed")
+
+    except FileNotFoundError:
+        send_error(conn, ERR_NOT_FOUND, "File or folder not found")
+    except FileExistsError:
+        send_error(conn, ERR_CMD_FAILED, "Already exists")
+    except OSError as e:
+        send_error(conn, ERR_CMD_FAILED, str(e).replace(",", " "))
+    except subprocess.TimeoutExpired:
+        send_error(conn, ERR_CMD_FAILED, "Command took too long")
+
+# ---------------------------------------------------------------
 # One thread runs this function for every client
 # ---------------------------------------------------------------
 def handle_client(conn, addr):
@@ -111,13 +211,25 @@ def handle_client(conn, addr):
                 print(f"[{addr}] closed the session")
                 break
 
-            send_error(conn, ERR_BAD_PACKET, "Unknown packet type")
+            if body.startswith("CM,"):
+                fields = body.split(",", 2)     # CM, command_type, arguments
+                if len(fields) != 3:
+                    send_error(conn, ERR_BAD_PACKET, "Format is (CM,type,arguments)")
+                    continue
+                cmd_type = fields[1].strip()
+                argument = fields[2].strip()
+                if cmd_type == "prompt":
+                    run_prompt(conn, session, argument)
+                else:
+                    send_error(conn, ERR_BAD_PACKET, f"Unknown command type {cmd_type}")
+
+            else:
+                send_error(conn, ERR_BAD_PACKET, "Unknown packet type")
 
     except (ConnectionResetError, BrokenPipeError):
         print(f"[{addr}] connection lost")
     finally:
         conn.close()
-
 
 def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -133,7 +245,6 @@ def main():
         t.daemon = True
         t.start()
         print(f"[*] Active clients: {threading.active_count() - 1}")
-
 
 if __name__ == "__main__":
     main()
