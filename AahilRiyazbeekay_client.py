@@ -3,6 +3,10 @@
 # connects to the server and shows a menu so we can control the server
 
 import socket
+import base64
+import random
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
 
 SERVER = "127.0.0.1"
 PORT = 5000
@@ -22,6 +26,31 @@ def receive_packet(sock):
 def send_packet(sock, packet):
     sock.sendall(packet.encode())
 
+# ### Caesar cipher (same as the server)
+def caesar_encrypt(text, shift):
+    result = ""
+    for ch in text:
+        if ch.isupper():
+            result = result + chr((ord(ch) - 65 + shift) % 26 + 65)
+        elif ch.islower():
+            result = result + chr((ord(ch) - 97 + shift) % 26 + 97)
+        else:
+            result = result + ch
+    return result
+
+def caesar_decrypt(text, shift):
+    return caesar_encrypt(text, -shift)
+
+def encrypt(text, algorithm, key):
+    if algorithm == "CAESAR":
+        return caesar_encrypt(text, key)
+    return text
+
+def decrypt(text, algorithm, key):
+    if algorithm == "CAESAR":
+        return caesar_decrypt(text, key)
+    return text
+
 # prints what the server answered
 # (SC,message) or (EE,code,description)
 def show_reply(reply):
@@ -33,15 +62,54 @@ def show_reply(reply):
     else:
         print("unknown reply from server:", reply)
 
-# setup phase, only non secure for now
+# setup phase, returns the algorithm and the session key
+# (None, None if not secure)
 def setup(sock):
-    send_packet(sock, "(SS,RFMP,v1.0,0)")
+    choice = input("Do you want secure communication? (y/n): ")
+    if choice != "y":
+        send_packet(sock, "(SS,RFMP,v1.0,0)")
+        reply = receive_packet(sock)
+        if reply != "(CC)":
+            print("server did not confirm:", reply)
+            sock.close()
+            exit()
+        print("connected (not secure)")
+        return None, None
+
+    algorithm = "CAESAR"   # only caesar for now
+    print("using Caesar cipher")
+    username = input("Enter username: ")
+
+    # 1. make the session key
+    key = random.randint(1, 25)   # caesar shift
+    session_key = str(key).encode()
+
+    # 2. make the client RSA keys
+    print("making RSA keys for the client...")
+    client_key = RSA.generate(2048)
+    client_public_key = base64.b64encode(client_key.publickey().export_key()).decode()
+
+    # 3. start packet, 1 means secure
+    send_packet(sock, "(SS,RFMP,v1.0,1)")
     reply = receive_packet(sock)
-    if reply != "(CC)":
-        print("server did not confirm:", reply)
+    if not reply.startswith("(CC,"):
+        print("server did not send its public key:", reply)
         sock.close()
         exit()
-    print("connected (not secure)")
+    server_public_key = RSA.import_key(base64.b64decode(reply[4:-1]))
+
+    # 4. lock the session key with the server public key
+    rsa = PKCS1_OAEP.new(server_public_key)
+    locked_key = base64.b64encode(rsa.encrypt(session_key)).decode()
+
+    # 5. send the encryption packet
+    send_packet(sock, "(EC," + algorithm + "," + locked_key + "," + username + ":" + client_public_key + ")")
+    reply = receive_packet(sock)
+    show_reply(reply)
+    if not reply.startswith("(SC"):
+        sock.close()
+        exit()
+    return algorithm, key
 
 def main():
     # create a TCP socket
@@ -52,7 +120,7 @@ def main():
         print("could not connect to the server, is it running?")
         return
 
-    setup(sock)
+    algorithm, key = setup(sock)
 
     while True:
         print()
@@ -99,7 +167,8 @@ def main():
             send_packet(sock, "(CM,openRead," + name + ")")
             reply = receive_packet(sock)
             if reply.startswith("(SC"):
-                text = reply[4:-1]
+                # file text comes encrypted if we are secure
+                text = decrypt(reply[4:-1], algorithm, key)
                 print("------ " + name + " ------")
                 print(text)
                 print("-------------------")
@@ -118,7 +187,8 @@ def main():
                 while line != "END":
                     text = text + line + "\n"
                     line = input()
-                send_packet(sock, "(DP," + text + ")")
+                # encrypt before sending if secure
+                send_packet(sock, "(DP," + encrypt(text, algorithm, key) + ")")
                 show_reply(receive_packet(sock))
 
         elif choice == "8":

@@ -7,6 +7,9 @@ import socket
 import threading
 import os
 import subprocess
+import base64
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
 
 HOST = "0.0.0.0"
 PORT = 5000
@@ -15,9 +18,16 @@ PORT = 5000
 # 100 = bad packet
 # 200 = file or folder not found
 # 300 = command failed / not allowed
+# 400 = encryption error
 
 # the 5 extra commands we picked and their names on windows
 extra_commands = {"ls": "dir", "pwd": "cd", "whoami": "whoami", "hostname": "hostname", "cat": "type"}
+
+# server makes its RSA keys one time when it starts
+print("making RSA keys for the server...")
+server_key = RSA.generate(2048)
+# base64 so the key is one line with no commas inside the packet
+server_public_key = base64.b64encode(server_key.publickey().export_key()).decode()
 
 def receive_packet(conn):
     # TCP can split a big message into parts
@@ -37,6 +47,32 @@ def send_packet(conn, packet):
 
 def send_error(conn, code, msg):
     send_packet(conn, "(EE," + code + "," + msg + ")")
+
+# ### Caesar cipher
+def caesar_encrypt(text, shift):
+    result = ""
+    for ch in text:
+        if ch.isupper():
+            result = result + chr((ord(ch) - 65 + shift) % 26 + 65)
+        elif ch.islower():
+            result = result + chr((ord(ch) - 97 + shift) % 26 + 97)
+        else:
+            result = result + ch   # numbers and symbols stay the same
+    return result
+
+def caesar_decrypt(text, shift):
+    return caesar_encrypt(text, -shift)
+
+# algorithm is None when the client did not ask for security
+def encrypt(text, algorithm, key):
+    if algorithm == "CAESAR":
+        return caesar_encrypt(text, key)
+    return text
+
+def decrypt(text, algorithm, key):
+    if algorithm == "CAESAR":
+        return caesar_decrypt(text, key)
+    return text
 
 # runs the prompt commands, returns the folder the client is in
 # (it only changes when the command is cd)
@@ -105,6 +141,8 @@ def handle_client(conn, addr):
     print("got a connection from", addr)
     cwd = os.getcwd()      # every client has its own folder
     write_file = None      # the file opened with openWrite
+    algorithm = None       # stays None if not secure
+    key = None
 
     try:
         # ### setup phase
@@ -120,9 +158,34 @@ def handle_client(conn, addr):
             send_packet(conn, "(CC)")
             print(addr, "not secure")
         elif fields[3] == "1":
-            # TODO secure mode
-            send_error(conn, "100", "secure mode is not done yet")
-            return
+            # send our public key, then the client sends the EC packet
+            send_packet(conn, "(CC," + server_public_key + ")")
+            packet = receive_packet(conn)
+            # (EC,Algorithm,session_key,username:client_public_key)
+            fields = packet[1:-1].split(",")
+            if len(fields) != 4 or fields[0] != "EC":
+                send_error(conn, "100", "expected encryption packet")
+                return
+
+            algorithm = fields[1].upper()
+            if algorithm != "CAESAR":
+                send_error(conn, "400", "only caesar works for now")
+                return
+
+            try:
+                # unlock the session key with our private key
+                rsa = PKCS1_OAEP.new(server_key)
+                session_key = rsa.decrypt(base64.b64decode(fields[2]))
+                username = fields[3].split(":")[0]
+                client_public_key = fields[3].split(":")[1]
+            except:
+                send_error(conn, "400", "could not decrypt the session key")
+                return
+
+            key = int(session_key.decode())   # caesar shift number
+            print(addr, "secure, user:", username, "algorithm:", algorithm)
+            print(addr, "client public key:", client_public_key[:40] + "...")
+            send_packet(conn, "(SC,secure connection ready)")
         else:
             send_error(conn, "100", "last field must be 0 or 1")
             return
@@ -154,7 +217,8 @@ def handle_client(conn, addr):
                         f = open(path, "r")
                         content = f.read()
                         f.close()
-                        send_packet(conn, "(SC," + content + ")")
+                        # encrypt the file text before sending if secure
+                        send_packet(conn, "(SC," + encrypt(content, algorithm, key) + ")")
                     else:
                         send_error(conn, "200", "file not found")
                 elif fields[1] == "openWrite":
@@ -173,7 +237,11 @@ def handle_client(conn, addr):
                 if write_file is None:
                     send_error(conn, "100", "use openWrite first")
                     continue
-                text = packet[4:-1]
+                try:
+                    text = decrypt(packet[4:-1], algorithm, key)
+                except:
+                    send_error(conn, "400", "could not decrypt the data")
+                    continue
                 f = open(write_file, "a")
                 f.write(text)
                 f.close()
